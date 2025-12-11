@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyc
+.Python
+venv/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
+
+# Environment
+.env
+.env.local
+
+# Data files (generated)
+data/target_companies.csv
+data/parsed/
+data/*.csv
+data/*.json
+
+# Database
+*.db
+*.sqlite
+
+# Logs
+*.log
