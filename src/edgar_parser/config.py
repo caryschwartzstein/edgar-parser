@@ -32,8 +32,10 @@ class Config:
         """Validate required configuration"""
         errors = []
 
-        if not self.DB_PASSWORD:
-            errors.append("DB_PASSWORD not set in .env file")
+        # DB_PASSWORD can be empty for local development with trust authentication
+        # if not self.DB_PASSWORD:
+        #     errors.append("DB_PASSWORD not set in .env file")
+
         if not self.EDGAR_USER_AGENT:
             errors.append("EDGAR_USER_AGENT not set in .env file (required by SEC)")
 
