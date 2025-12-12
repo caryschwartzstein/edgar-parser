@@ -201,7 +201,11 @@ class EDGARParser:
             cash_result
         )
 
+        # Extract fiscal year from fiscal_year_end (e.g., "2025" from "2025-09-27")
+        fiscal_year = period_end[:4]
+
         return {
+            'fiscal_year': fiscal_year,
             'fiscal_year_end': period_end,
             'filing_date': filing_info['filed'],
             'form': form_type,
@@ -241,6 +245,81 @@ class EDGARParser:
                     }
 
         return period_gaap_data
+
+    def _calculate_quarterly_deltas(self, quarterly_periods: List[Dict]) -> None:
+        """
+        Calculate true quarterly values by de-cumulating YTD income statement items.
+
+        Income statement items in 10-Q filings are cumulative year-to-date:
+        - Q1: Jan-Mar (3 months)
+        - Q2: Jan-Jun (6 months cumulative)
+        - Q3: Jan-Sep (9 months cumulative)
+
+        To get true quarterly values:
+        - Q1 = Q1_YTD (already isolated)
+        - Q2 = Q2_YTD - Q1_YTD
+        - Q3 = Q3_YTD - Q2_YTD
+
+        This method modifies quarterly_periods in place, adding 'quarterly_value'
+        fields to income statement metrics (EBIT only for now).
+
+        Balance sheet items (Assets, Debt, Cash, Liabilities) are point-in-time
+        snapshots and are NOT de-cumulated.
+
+        Args:
+            quarterly_periods: List of quarterly period dictionaries to modify
+        """
+        if not quarterly_periods:
+            return
+
+        # Group quarters by fiscal year
+        # We use the year from fiscal_year_end to group, but need to be smart about
+        # fiscal years that don't align with calendar years (e.g., Apple ends in September)
+        fiscal_years = defaultdict(list)
+
+        for period in quarterly_periods:
+            # Extract just the year from fiscal_year_end (e.g., "2025" from "2025-09-27")
+            fy_key = period['fiscal_year_end'][:4]
+            fiscal_years[fy_key].append(period)
+
+        # Process each fiscal year separately
+        for fy, quarters in fiscal_years.items():
+            # Sort chronologically by fiscal_year_end (earliest first for processing)
+            sorted_quarters = sorted(quarters, key=lambda x: x['fiscal_year_end'])
+
+            # De-cumulate EBIT for each quarter
+            for i, quarter in enumerate(sorted_quarters):
+                ebit_data = quarter.get('metrics', {}).get('ebit')
+
+                if not ebit_data or ebit_data.get('value') is None:
+                    # No EBIT data - skip this quarter
+                    continue
+
+                if i == 0:
+                    # First quarter of fiscal year: YTD = quarterly (no subtraction needed)
+                    ebit_data['ytd_value'] = ebit_data['value']
+                    ebit_data['quarterly_value'] = ebit_data['value']
+                    ebit_data['is_q1'] = True
+                    ebit_data['calculation_note'] = 'Q1 - YTD equals quarterly (no de-cumulation needed)'
+                else:
+                    # Subsequent quarters: try to calculate delta
+                    prev_ebit = sorted_quarters[i-1].get('metrics', {}).get('ebit')
+
+                    # Store YTD value
+                    ebit_data['ytd_value'] = ebit_data['value']
+
+                    if prev_ebit and prev_ebit.get('value') is not None:
+                        # We have previous quarter's data - can de-cumulate
+                        quarterly_value = ebit_data['value'] - prev_ebit['value']
+                        ebit_data['quarterly_value'] = quarterly_value
+                        ebit_data['is_calculated'] = True
+                        ebit_data['calculation_note'] = f'De-cumulated from YTD (current YTD - previous YTD)'
+                        ebit_data['previous_quarter_ytd'] = prev_ebit['value']
+                    else:
+                        # Previous quarter missing EBIT - cannot de-cumulate
+                        ebit_data['quarterly_value'] = None
+                        ebit_data['calculation_failed'] = True
+                        ebit_data['calculation_note'] = 'Cannot de-cumulate - previous quarter missing EBIT'
 
     def _calculate_roce(
         self,
@@ -412,7 +491,7 @@ class EDGARParser:
         else:
             return "Low earnings yield - potentially expensive (compare to Treasury rates)"
 
-    def parse_company_data(self, edgar_data: Dict, verbose: bool = False) -> Dict:
+    def parse_company_data(self, edgar_data: Dict, verbose: bool = False, include_quarterly: bool = True) -> Dict:
         """
         Parse EDGAR data and extract ALL fiscal periods with complete metrics.
 
@@ -424,6 +503,7 @@ class EDGARParser:
         Args:
             edgar_data: Raw EDGAR data dictionary
             verbose: Print detailed progress information
+            include_quarterly: Include quarterly (10-Q) data in addition to annual (10-K)
 
         Returns:
             Comprehensive parsed data structure
@@ -436,14 +516,36 @@ class EDGARParser:
             print(f"EDGAR Parser V2: {company_name} (CIK: {cik})")
             print(f"{'='*80}\n")
 
-        # Extract all fiscal periods
-        all_periods = self.extract_all_periods(edgar_data, form_type="10-K")
+        # Extract annual periods (10-K)
+        annual_periods = self.extract_all_periods(edgar_data, form_type="10-K")
 
         if verbose:
-            print(f"Found {len(all_periods)} fiscal periods\n")
+            print(f"Found {len(annual_periods)} annual periods (10-K)")
+
+        # Extract quarterly periods (10-Q) if requested
+        quarterly_periods = []
+        if include_quarterly:
+            quarterly_periods = self.extract_all_periods(edgar_data, form_type="10-Q")
+            if verbose:
+                print(f"Found {len(quarterly_periods)} quarterly periods (10-Q)")
+
+            # Calculate de-cumulated quarterly values for income statement items
+            self._calculate_quarterly_deltas(quarterly_periods)
+            if verbose:
+                print(f"Calculated quarterly deltas for income statement items")
+
+        if verbose:
+            print()
 
         # Create calculation logs for each period
-        for period in all_periods:
+        for period in annual_periods:
+            period['calculation_log'] = self._create_calculation_log(
+                period,
+                company_name,
+                cik
+            )
+
+        for period in quarterly_periods:
             period['calculation_log'] = self._create_calculation_log(
                 period,
                 company_name,
@@ -457,13 +559,15 @@ class EDGARParser:
                 'cik': cik,
                 'parsed_at': datetime.now().isoformat(),
                 'parser_version': '2.0',
-                'total_periods': len(all_periods),
+                'total_annual_periods': len(annual_periods),
+                'total_quarterly_periods': len(quarterly_periods),
                 'guide_version': 'Financial Metrics Extraction Guide - December 2024',
             },
-            'annual_periods': all_periods
+            'annual_periods': annual_periods,
+            'quarterly_periods': quarterly_periods
         }
 
-        if verbose and all_periods:
+        if verbose and (annual_periods or quarterly_periods):
             self._print_summary(result)
 
         return result
@@ -518,23 +622,47 @@ class EDGARParser:
         metadata = result['metadata']
         print(f"Company: {metadata['company_name']}")
         print(f"CIK: {metadata['cik']}")
-        print(f"Total periods extracted: {metadata['total_periods']}\n")
+        print(f"Annual periods: {metadata['total_annual_periods']}")
+        print(f"Quarterly periods: {metadata['total_quarterly_periods']}\n")
 
-        print("Fiscal Periods:")
-        print(f"{'Year End':<15} {'ROCE':<10} {'EBIT Method':<30} {'Status':<20}")
-        print("-" * 80)
+        # Print annual periods
+        if result['annual_periods']:
+            print("Annual Periods (10-K):")
+            print(f"{'Year End':<15} {'ROCE':<10} {'EBIT Method':<30} {'Status':<20}")
+            print("-" * 80)
 
-        for period in result['annual_periods']:
-            year_end = period['fiscal_year_end']
-            roce = period.get('calculated_ratios', {}).get('roce', {})
-            roce_val = f"{roce.get('value', 0):.2f}%" if roce.get('value') else "N/A"
+            for period in result['annual_periods']:
+                year_end = period['fiscal_year_end']
+                roce = period.get('calculated_ratios', {}).get('roce', {})
+                roce_val = f"{roce.get('value', 0):.2f}%" if roce.get('value') else "N/A"
 
-            ebit = period.get('metrics', {}).get('ebit', {})
-            ebit_method = ebit.get('method', 'N/A')[:28]
+                ebit = period.get('metrics', {}).get('ebit', {})
+                ebit_method = ebit.get('method', 'N/A')[:28]
 
-            marker = "← MOST RECENT" if period.get('is_most_recent') else ""
+                marker = "← MOST RECENT" if period.get('is_most_recent') else ""
 
-            print(f"{year_end:<15} {roce_val:<10} {ebit_method:<30} {marker:<20}")
+                print(f"{year_end:<15} {roce_val:<10} {ebit_method:<30} {marker:<20}")
+
+        # Print quarterly periods
+        if result['quarterly_periods']:
+            print(f"\nQuarterly Periods (10-Q):")
+            print(f"{'Period End':<15} {'ROCE':<10} {'EBIT Method':<30} {'Status':<20}")
+            print("-" * 80)
+
+            for period in result['quarterly_periods'][:12]:  # Show last 12 quarters
+                period_end = period['fiscal_year_end']
+                roce = period.get('calculated_ratios', {}).get('roce', {})
+                roce_val = f"{roce.get('value', 0):.2f}%" if roce.get('value') else "N/A"
+
+                ebit = period.get('metrics', {}).get('ebit', {})
+                ebit_method = ebit.get('method', 'N/A')[:28]
+
+                marker = "← MOST RECENT" if period.get('is_most_recent') else ""
+
+                print(f"{period_end:<15} {roce_val:<10} {ebit_method:<30} {marker:<20}")
+
+            if len(result['quarterly_periods']) > 12:
+                print(f"... and {len(result['quarterly_periods']) - 12} more quarters")
 
     def get_most_recent_period(self, parsed_data: Dict) -> Optional[Dict]:
         """Get just the most recent fiscal period from parsed data."""

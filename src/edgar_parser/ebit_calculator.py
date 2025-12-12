@@ -129,7 +129,8 @@ class EBITCalculator:
 
     def _tier_1_direct_operating_income(
         self,
-        gaap_data: Dict
+        gaap_data: Dict,
+        form_type: str = "10-K"
     ) -> Optional[Tuple[float, str, Dict, Optional[str]]]:
         """
         Tier 1: Try to get Operating Income directly or calculate Revenues - CostsAndExpenses.
@@ -142,13 +143,18 @@ class EBITCalculator:
         For companies with simple structures, these should match exactly or be very close
         (within $1M tolerance).
 
+        Args:
+            gaap_data: Dictionary of GAAP facts
+            form_type: Form type to filter on (10-K or 10-Q)
+
         Returns:
             Tuple of (ebit_value, method, sources, validation_note) or None
         """
         # Priority 1: Direct OperatingIncomeLoss
         operating_income = self._get_tag_value(
             gaap_data,
-            self.TIER_1_TAGS['operating_income_direct']
+            self.TIER_1_TAGS['operating_income_direct'],
+            form_type
         )
         if operating_income and operating_income['val'] is not None:
             return (
@@ -159,8 +165,8 @@ class EBITCalculator:
             )
 
         # Priority 2: Revenues - CostsAndExpenses (with validation)
-        revenues = self._get_tag_value(gaap_data, self.TIER_1_TAGS['revenues'])
-        costs = self._get_tag_value(gaap_data, self.TIER_1_TAGS['costs_and_expenses'])
+        revenues = self._get_tag_value(gaap_data, self.TIER_1_TAGS['revenues'], form_type)
+        costs = self._get_tag_value(gaap_data, self.TIER_1_TAGS['costs_and_expenses'], form_type)
 
         if revenues and costs and revenues['val'] is not None and costs['val'] is not None:
             ebit = revenues['val'] - costs['val']
@@ -168,7 +174,8 @@ class EBITCalculator:
             # VALIDATION: Check against pre-tax income
             pretax = self._get_tag_value(
                 gaap_data,
-                self.TIER_1_TAGS['pretax_income_validation']
+                self.TIER_1_TAGS['pretax_income_validation'],
+                form_type
             )
 
             validation_note = None
@@ -199,7 +206,8 @@ class EBITCalculator:
 
     def _tier_2_build_from_components(
         self,
-        gaap_data: Dict
+        gaap_data: Dict,
+        form_type: str = "10-K"
     ) -> Optional[Tuple[float, str, Dict, Optional[str]]]:
         """
         Tier 2: Build EBIT from components: Revenues - COGS - Operating Expenses.
@@ -207,12 +215,16 @@ class EBITCalculator:
         Per guide:
         EBIT = Revenues - CostOfGoodsAndServicesSold - OperatingCostsAndExpenses
 
+        Args:
+            gaap_data: Dictionary of GAAP facts
+            form_type: Form type to filter on (10-K or 10-Q)
+
         Returns:
             Tuple of (ebit_value, method, sources, validation_note) or None
         """
-        revenues = self._get_tag_value(gaap_data, self.TIER_2_TAGS['revenues'])
-        cogs = self._get_tag_value(gaap_data, self.TIER_2_TAGS['cogs'])
-        opex = self._get_tag_value(gaap_data, self.TIER_2_TAGS['operating_expenses'])
+        revenues = self._get_tag_value(gaap_data, self.TIER_2_TAGS['revenues'], form_type)
+        cogs = self._get_tag_value(gaap_data, self.TIER_2_TAGS['cogs'], form_type)
+        opex = self._get_tag_value(gaap_data, self.TIER_2_TAGS['operating_expenses'], form_type)
 
         if all([revenues, cogs, opex]) and all(x['val'] is not None for x in [revenues, cogs, opex]):
             ebit = revenues['val'] - cogs['val'] - opex['val']
@@ -231,7 +243,8 @@ class EBITCalculator:
 
     def _tier_3_work_backwards_from_net_income(
         self,
-        gaap_data: Dict
+        gaap_data: Dict,
+        form_type: str = "10-K"
     ) -> Optional[Tuple[float, str, Dict, Optional[str]]]:
         """
         Tier 3: Work backwards from Net Income.
@@ -239,12 +252,16 @@ class EBITCalculator:
         Per guide:
         EBIT = NetIncomeLoss + IncomeTaxExpenseBenefit + InterestExpenseDebt
 
+        Args:
+            gaap_data: Dictionary of GAAP facts
+            form_type: Form type to filter on (10-K or 10-Q)
+
         Returns:
             Tuple of (ebit_value, method, sources, validation_note) or None
         """
-        net_income = self._get_tag_value(gaap_data, self.TIER_3_TAGS['net_income'])
-        tax = self._get_tag_value(gaap_data, self.TIER_3_TAGS['income_tax'])
-        interest = self._get_tag_value(gaap_data, self.TIER_3_TAGS['interest_expense'])
+        net_income = self._get_tag_value(gaap_data, self.TIER_3_TAGS['net_income'], form_type)
+        tax = self._get_tag_value(gaap_data, self.TIER_3_TAGS['income_tax'], form_type)
+        interest = self._get_tag_value(gaap_data, self.TIER_3_TAGS['interest_expense'], form_type)
 
         if all([net_income, tax, interest]) and all(x['val'] is not None for x in [net_income, tax, interest]):
             ebit = net_income['val'] + tax['val'] + interest['val']
@@ -263,7 +280,8 @@ class EBITCalculator:
 
     def _tier_4_pretax_plus_interest(
         self,
-        gaap_data: Dict
+        gaap_data: Dict,
+        form_type: str = "10-K"
     ) -> Optional[Tuple[float, str, Dict, Optional[str]]]:
         """
         Tier 4: Last resort - Pre-tax Income + Interest.
@@ -271,11 +289,15 @@ class EBITCalculator:
         Per guide:
         EBIT = IncomeLossFromContinuingOperationsBeforeIncomeTaxes... + InterestExpenseDebt
 
+        Args:
+            gaap_data: Dictionary of GAAP facts
+            form_type: Form type to filter on (10-K or 10-Q)
+
         Returns:
             Tuple of (ebit_value, method, sources, validation_note) or None
         """
-        pretax = self._get_tag_value(gaap_data, self.TIER_4_TAGS['pretax_income'])
-        interest = self._get_tag_value(gaap_data, self.TIER_4_TAGS['interest_expense'])
+        pretax = self._get_tag_value(gaap_data, self.TIER_4_TAGS['pretax_income'], form_type)
+        interest = self._get_tag_value(gaap_data, self.TIER_4_TAGS['interest_expense'], form_type)
 
         if all([pretax, interest]) and all(x['val'] is not None for x in [pretax, interest]):
             ebit = pretax['val'] + interest['val']
@@ -316,7 +338,7 @@ class EBITCalculator:
             self._tier_3_work_backwards_from_net_income,
             self._tier_4_pretax_plus_interest,
         ], start=1):
-            result = tier_method(gaap_data)
+            result = tier_method(gaap_data, form_type)
             if result:
                 ebit_value, method, sources, validation_note = result
                 logger.info(f"EBIT calculated using Tier {tier_num}: {method}")
